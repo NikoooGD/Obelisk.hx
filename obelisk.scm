@@ -1,4 +1,4 @@
-;; obelisk.hx v1.1 - Obsidian for Helix
+;; obelisk.hx v1.1 - FIXED parens
 (require "helix/editor.scm")
 (require (prefix-in helix. "helix/commands.scm"))
 
@@ -21,10 +21,8 @@
     (let loop ((st 0) (en (- len 1)))
       (cond
         ((> st en) "")
-        ((or (char=? (string-ref s st) #\space) (char=? (string-ref s st) #\tab))
-         (loop (+ st 1) en))
-        ((or (char=? (string-ref s en) #\space) (char=? (string-ref s en) #\tab))
-         (loop st (- en 1)))
+        ((char=? (string-ref s st) #\space) (loop (+ st 1) en))
+        ((char=? (string-ref s en) #\space) (loop st (- en 1)))
         (else (substring s st (+ en 1)))))))
 
 (define (my-split-lines s)
@@ -68,13 +66,7 @@
         (let ((end (let loop ((i (+ start 2)))
                      (if (>= (+ i 1) (string-length line)) #f
                          (if (and (char=? (string-ref line i) #\]) (char=? (string-ref line (+ i 1)) #\])) i (loop (+ i 1)))))))
-          (if (not end) #f
-              (let ((raw (substring line (+ start 2) end)))
-                (let ((pipe-pos (let loop ((i 0)) (if (>= i (string-length raw)) #f (if (char=? (string-ref raw i) #\|) i (loop (+ i 1))))))
-                      (hash-pos (let loop ((i 0)) (if (>= i (string-length raw)) #f (if (char=? (string-ref raw i) #\#) i (loop (+ i 1)))))))
-                  (cond (pipe-pos (substring raw 0 pipe-pos))
-                        (hash-pos (substring raw 0 hash-pos))
-                        (else raw)))))))))
+          (if (not end) #f (substring line (+ start 2) end))))))
 
 (define (get-current-file-path)
   (let* ((focus (editor-focus)) (doc-id (editor->doc-id focus)) (path (editor-document->path doc-id))) path))
@@ -86,9 +78,6 @@
           (if (>= i (string-length p)) (substring p last (string-length p))
               (if (char=? (string-ref p i) #\/) (loop (+ i 1) (+ i 1)) (loop (+ i 1) last)))))))
 
-;; --- vault scan ---
-;; Steel has no stable read-dir, so we use vault/index.txt
-;; Generate it with: cd vault && rg --files > index.txt
 (define (vault-files)
   (let ((idx (string-append vault-path "/index.txt")))
     (if (file-exists? idx)
@@ -115,6 +104,25 @@
     (write-file-simple p (string-append "# Obelisk " name "\n\n" (my-join-lines lines "\n") "\n"))
     p))
 
+;; --- helpers for follow, kept flat ---
+
+(define (extract-first-link path)
+  (let ((lines (my-split-lines (read-file-simple path))))
+    (let loop ((ls lines))
+      (if (null? ls) #f
+          (let ((link (extract-wikilink (car ls))))
+            (if link link (loop (cdr ls))))))))
+
+(define (open-link link)
+  (let* ((trimmed (my-trim link))
+         (with-md (if (string-contains? trimmed ".md") trimmed (string-append trimmed ".md")))
+         (full-path (string-append vault-path "/" with-md)))
+    (if (file-exists? full-path)
+        (helix.open full-path)
+        (begin
+          (write-file-simple full-path (string-append "# " trimmed "\n\n"))
+          (helix.open full-path)))))
+
 ;; --- commands ---
 
 ;;@doc Open vault
@@ -126,22 +134,17 @@
     (when (not (file-exists? daily)) (write-file-simple daily "# Daily Notes\n\n"))
     (helix.open daily)))
 
-;;@doc Follow [[wikilink]]
+;;@doc Follow [[wikilink]] - flat, no deep nesting
 (define (obelisk-follow)
   (let ((path (get-current-file-path)))
-    (if (not path) (helix.open vault-path)
-        (let ((lines (my-split-lines (read-file-simple path))))
-          (let loop ((ls lines))
-            (if (null? ls) (helix.open vault-path)
-                (let ((link (extract-wikilink (car ls))))
-                  (if (not link) (loop (cdr ls))
-                      (let* ((trimmed (my-trim link))
-                             (with-md (if (string-contains? trimmed ".md") trimmed (string-append trimmed ".md")))
-                             (full-path (string-append vault-path "/" with-md)))
-                        (if (file-exists? full-path) (helix.open full-path)
-                            (begin (write-file-simple full-path (string-append "# " trimmed "\n\n")) (helix.open full-path)))))))))))))
+    (if (not path)
+        (helix.open vault-path)
+        (let ((link (extract-first-link path)))
+          (if (not link)
+              (helix.open vault-path)
+              (open-link link))))))
 
-;;@doc New note: (obelisk-new "My Note")
+;;@doc New note
 (define (obelisk-new name)
   (let* ((trimmed (my-trim name))
          (with-md (if (string-contains? trimmed ".md") trimmed (string-append trimmed ".md")))
@@ -149,30 +152,32 @@
     (when (not (file-exists? full)) (write-file-simple full (string-append "# " trimmed "\n\n")))
     (helix.open full)))
 
-;;@doc Search vault: (obelisk-search "query")
+;;@doc Search vault
 (define (obelisk-search query)
   (let ((results (find-in-vault query)))
-    (if (null? results) (helix.open vault-path)
+    (if (null? results)
+        (helix.open vault-path)
         (let ((p (write-results-file "search" (cons (string-append "Search: " query) results))))
           (helix.vsplit)
           (helix.open p)))))
 
-;;@doc Real tags
+;;@doc Tags
 (define (obelisk-tags)
   (let ((results (find-in-vault "#")))
-    (if (null? results) (helix.open vault-path)
+    (if (null? results)
+        (helix.open vault-path)
         (let ((p (write-results-file "tags" results)))
           (helix.vsplit)
           (helix.open p)))))
 
-;;@doc Real backlinks
+;;@doc Backlinks
 (define (obelisk-backlinks)
   (let* ((fname (get-current-file-name))
          (base (if (string-contains? fname ".md") (substring fname 0 (- (string-length fname) 3)) fname))
          (needle (string-append "[[" base))
          (results (find-in-vault needle)))
     (if (null? results)
-        (let ((p (write-results-file "backlinks" (list (string-append "No backlinks for [[" base "]]") "" "Tip: cd vault && rg --files > index.txt"))))
+        (let ((p (write-results-file "backlinks" (list (string-append "No backlinks for [[" base "]]")))))
           (helix.vsplit)
           (helix.open p))
         (let ((p (write-results-file "backlinks" (cons (string-append "Backlinks for [[" base "]]") results))))
