@@ -1,4 +1,4 @@
-;; obelisk.hx v1.1 - FIXED parens
+;; obelisk.hx v1.1.1 - Obsidian for Helix
 (require "helix/editor.scm")
 (require (prefix-in helix. "helix/commands.scm"))
 
@@ -99,12 +99,18 @@
       (if (null? fs) out
           (loop (cdr fs) (append out (find-in-file (car fs) needle)))))))
 
-(define (write-results-file name lines)
-  (let ((p (string-append "/tmp/obelisk-" name ".md")))
-    (write-file-simple p (string-append "# Obelisk " name "\n\n" (my-join-lines lines "\n") "\n"))
-    p))
+;; --- FIXED v1.1.1: next-free-path ---
+(define obelisk-counter 0)
 
-;; --- helpers for follow, kept flat ---
+(define (write-results-file name lines)
+  (set! obelisk-counter (+ obelisk-counter 1))
+  (let loop ((n obelisk-counter))
+    (let ((p (string-append "/tmp/obelisk-" name "-" (number->string n) ".md")))
+      (if (file-exists? p)
+          (loop (+ n 1))
+          (begin
+            (write-file-simple p (string-append "# Obelisk " name "\n\n" (my-join-lines lines "\n") "\n"))
+            p)))))
 
 (define (extract-first-link path)
   (let ((lines (my-split-lines (read-file-simple path))))
@@ -134,7 +140,7 @@
     (when (not (file-exists? daily)) (write-file-simple daily "# Daily Notes\n\n"))
     (helix.open daily)))
 
-;;@doc Follow [[wikilink]] - flat, no deep nesting
+;;@doc Follow [[wikilink]]
 (define (obelisk-follow)
   (let ((path (get-current-file-path)))
     (if (not path)
