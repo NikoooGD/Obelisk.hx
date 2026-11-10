@@ -1,9 +1,45 @@
-;; obelisk.hx v1.1.1 - Obsidian for Helix
+;; obelisk.hx v1.3 - Obsidian for Helix, Trail-style
 (require "helix/editor.scm")
+(require "helix/misc.scm")
+(require "helix/components.scm")
+(require "helix/static.scm")
 (require (prefix-in helix. "helix/commands.scm"))
 
-(define vault-path "/home/alya/Documents/Obsidian Vault")
+;; --- 1. ENV - from trail.scm ---
+;; steel has no getenv, parse /proc/self/environ
+(define (obelisk-env-var name)
+  (with-handler
+    (lambda (_) "")
+    (let* ([p (open-input-file "/proc/self/environ")]
+           [raw (read-port-to-string p)])
+      (close-input-port p)
+      (let* ([key (string-append name "=")]
+             [klen (string-length key)]
+             [rlen (string-length raw)])
+        (let outer ([i 0])
+          (cond
+            [(> (+ i klen) rlen) ""]
+            [(let inner ([j 0])
+               (cond [(= j klen) #true]
+                     [(char=? (string-ref raw (+ i j)) (string-ref key j)) (inner (+ j 1))]
+                     [else #false]))
+             (let* ([start (+ i klen)]
+                    [end (let scan ([k start])
+                           (if (or (>= k rlen) (char=? (string-ref raw k) (integer->char 0)))
+                               k (scan (+ k 1))))])
+               (substring raw start end))]
+            [else (outer (+ i 1))]))))))
 
+(define *obelisk-home* (obelisk-env-var "HOME"))
+(define *obelisk-home-fallback* "/home/alya")
+(when (equal? *obelisk-home* "") (set! *obelisk-home* *obelisk-home-fallback*))
+
+(define vault-path (string-append *obelisk-home* "/Documents/Obsidian Vault"))
+(when (not (file-exists? vault-path))
+  (when (file-exists? (string-append *obelisk-home* "/Obsidian"))
+    (set! vault-path (string-append *obelisk-home* "/Obsidian"))))
+
+;; --- helpers ---
 (define (file-exists? path)
   (let ((exists #f))
     (with-handler (lambda (e) (set! exists #f))
@@ -11,10 +47,6 @@
         (set! exists #t)
         (close-input-port p)))
     exists))
-
-(when (not (file-exists? vault-path))
-  (when (file-exists? "/home/alya/Obsidian")
-    (set! vault-path "/home/alya/Obsidian")))
 
 (define (my-trim s)
   (let ((len (string-length s)))
@@ -47,7 +79,10 @@
             (begin (close-input-port port) (my-join-lines (reverse acc) "\n"))
             (loop (cons line acc)))))))
 
+;; --- 2. WRITE - from trail-save! ---
+;; delete-file! exists, delete-file does not
 (define (write-file-simple path content)
+  (with-handler (lambda (_) #false) (delete-file! path))
   (let ((out (open-output-file path)))
     (display content out)
     (close-output-port out)))
@@ -78,11 +113,34 @@
           (if (>= i (string-length p)) (substring p last (string-length p))
               (if (char=? (string-ref p i) #\/) (loop (+ i 1) (+ i 1)) (loop (+ i 1) last)))))))
 
-(define (vault-files)
-  (let ((idx (string-append vault-path "/index.txt")))
-    (if (file-exists? idx)
-        (my-split-lines (read-file-simple idx))
-        (list (string-append vault-path "/Daily.md")))))
+(define (get-base-name p)
+  (let loop ((i 0) (last 0))
+    (if (>= i (string-length p))
+        (substring p last (- (string-length p) 3))
+        (if (char=? (string-ref p i) #\/)
+            (loop (+ i 1) (+ i 1))
+            (loop (+ i 1) last)))))
+
+;; --- 3. SCAN - from trail-scan-files ---
+(define *obelisk-ignore-set*
+  (hashset ".git" "node_modules" "target" ".direnv" "__pycache__" ".hg" ".venv" "dist" "build" ".jj" ".obsidian"))
+
+(define (obelisk-scan-files root)
+  (define acc '())
+  (define (walk dir)
+    (for-each
+     (lambda (p)
+       (define name (file-name p))
+       (unless (hashset-contains? *obelisk-ignore-set* name)
+         (if (is-dir? p)
+             (walk p)
+             (when (string-contains? p ".md")
+               (set! acc (cons p acc))))))
+     (with-handler (lambda (_) '()) (read-dir dir))))
+  (walk root)
+  acc)
+
+(define (vault-files) (obelisk-scan-files vault-path))
 
 (define (find-in-file path needle)
   (if (not (file-exists? path)) '()
@@ -90,7 +148,8 @@
         (let loop ((ls lines) (n 1) (out '()))
           (if (null? ls) (reverse out)
               (if (string-contains? (car ls) needle)
-                  (loop (cdr ls) (+ n 1) (cons (string-append path ":" (number->string n) ": " (car ls)) out))
+                  (loop (cdr ls) (+ n 1)
+                        (cons (string-append "[[" (get-base-name path) "]] :" (number->string n) ": " (car ls)) out))
                   (loop (cdr ls) (+ n 1) out)))))))
 
 (define (find-in-vault needle)
@@ -99,18 +158,11 @@
       (if (null? fs) out
           (loop (cdr fs) (append out (find-in-file (car fs) needle)))))))
 
-;; --- FIXED v1.1.1: next-free-path ---
-(define obelisk-counter 0)
-
+;; --- results file - now with delete-file! so reuse works ---
 (define (write-results-file name lines)
-  (set! obelisk-counter (+ obelisk-counter 1))
-  (let loop ((n obelisk-counter))
-    (let ((p (string-append "/tmp/obelisk-" name "-" (number->string n) ".md")))
-      (if (file-exists? p)
-          (loop (+ n 1))
-          (begin
-            (write-file-simple p (string-append "# Obelisk " name "\n\n" (my-join-lines lines "\n") "\n"))
-            p)))))
+  (let ((p (string-append "/tmp/obelisk-" name ".md")))
+    (write-file-simple p (string-append "# Obelisk " name "\n\n" (my-join-lines lines "\n") "\n"))
+    p))
 
 (define (extract-first-link path)
   (let ((lines (my-split-lines (read-file-simple path))))
