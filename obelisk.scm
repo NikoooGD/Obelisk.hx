@@ -6,6 +6,14 @@
 (require "helix/static.scm")
 (require (prefix-in helix. "helix/commands.scm"))
 
+(define (file-exists? path)
+  (let ((exists #f))
+    (with-handler (lambda (e) (set! exists #f))
+      (let ((p (open-input-file path)))
+        (set! exists #t)
+        (close-input-port p)))
+    exists))
+
 ;; --- ENV - from trail.scm ---
 (define (obelisk-env-var name)
   (with-handler
@@ -36,14 +44,6 @@
 (define vault-path (string-append *obelisk-home* "/Documents/Obsidian Vault"))
 
 ;; --- helpers ---
-(define (file-exists? path)
-  (let ((exists #f))
-    (with-handler (lambda (e) (set! exists #f))
-      (let ((p (open-input-file path)))
-        (set! exists #t)
-        (close-input-port p)))
-    exists))
-
 (define (my-trim s)
   (let ((len (string-length s)))
     (let loop ((st 0) (en (- len 1)))
