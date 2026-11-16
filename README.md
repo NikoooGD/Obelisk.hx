@@ -8,7 +8,7 @@ Obsidian integration for Helix (steel-event-system).
 
 - **Ob**sidian + He**lix** = Obelisk
 - Ancient obelisks were often carved from obsidian
-- Short, memorable, no conflict with Obsidian.md trademark
+- Short, memorable.
 
 ## Install
 
