@@ -1,5 +1,5 @@
-;; obelisk.hx v1.3.2 - Obsidian for Helix, no Obsidian app required
-;; Fixes: v1.3.1 ensure-vault + v1.3.2 variadic commands (ArityMismatch)
+;; obelisk.hx v1.3.3 - Obsidian for Helix, no Obsidian app required
+;; Fixes: v1.3.1 ensure-vault + v1.3.2 variadic commands (ArityMismatch) + v1.3.3 wikilink pipe syntax
 (require "helix/editor.scm")
 (require "helix/misc.scm")
 (require "helix/components.scm")
@@ -95,7 +95,15 @@
         (let ((end (let loop ((i (+ start 2)))
                      (if (>= (+ i 1) (string-length line)) #f
                          (if (and (char=? (string-ref line i) #\]) (char=? (string-ref line (+ i 1)) #\])) i (loop (+ i 1)))))))
-          (if (not end) #f (substring line (+ start 2) end))))))
+          (if (not end) #f
+              (let ((raw (substring line (+ start 2) end)))
+                ;; Handle [[link|display]] pipe syntax - extract only the link part
+                (let ((pipe-pos (let loop ((i 0))
+                                  (if (>= i (string-length raw)) #f
+                                      (if (char=? (string-ref raw i) #\|) i (loop (+ i 1)))))))
+                  (if pipe-pos
+                      (substring raw 0 pipe-pos)
+                      raw))))))))
 
 (define (get-current-file-path)
   (let* ((focus (editor-focus)) (doc-id (editor->doc-id focus)) (path (editor-document->path doc-id))) path))
