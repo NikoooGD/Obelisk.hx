@@ -1,9 +1,41 @@
-;; obelisk.hx v1.1.1 - Obsidian for Helix
+;; obelisk.hx v1.3.2 - Obsidian for Helix, no Obsidian app required
+;; Fixes: v1.3.1 ensure-vault + v1.3.2 variadic commands (ArityMismatch)
 (require "helix/editor.scm")
+(require "helix/misc.scm")
+(require "helix/components.scm")
+(require "helix/static.scm")
 (require (prefix-in helix. "helix/commands.scm"))
 
-(define vault-path "/home/alya/Documents/Obsidian Vault")
+;; --- ENV - from trail.scm ---
+(define (obelisk-env-var name)
+  (with-handler
+    (lambda (_) "")
+    (let* ([p (open-input-file "/proc/self/environ")]
+           [raw (read-port-to-string p)])
+      (close-input-port p)
+      (let* ([key (string-append name "=")]
+             [klen (string-length key)]
+             [rlen (string-length raw)])
+        (let outer ([i 0])
+          (cond
+            [(> (+ i klen) rlen) ""]
+            [(let inner ([j 0])
+               (cond [(= j klen) #true]
+                     [(char=? (string-ref raw (+ i j)) (string-ref key j)) (inner (+ j 1))]
+                     [else #false]))
+             (let* ([start (+ i klen)]
+                    [end (let scan ([k start])
+                           (if (or (>= k rlen) (char=? (string-ref raw k) (integer->char 0)))
+                               k (scan (+ k 1))))])
+               (substring raw start end))]
+            [else (outer (+ i 1))]))))))
 
+(define *obelisk-home* (obelisk-env-var "HOME"))
+(when (equal? *obelisk-home* "") (set! *obelisk-home* "/home/alya"))
+
+(define vault-path (string-append *obelisk-home* "/Documents/Obsidian Vault"))
+
+;; --- helpers ---
 (define (file-exists? path)
   (let ((exists #f))
     (with-handler (lambda (e) (set! exists #f))
@@ -11,10 +43,6 @@
         (set! exists #t)
         (close-input-port p)))
     exists))
-
-(when (not (file-exists? vault-path))
-  (when (file-exists? "/home/alya/Obsidian")
-    (set! vault-path "/home/alya/Obsidian")))
 
 (define (my-trim s)
   (let ((len (string-length s)))
@@ -48,6 +76,7 @@
             (loop (cons line acc)))))))
 
 (define (write-file-simple path content)
+  (with-handler (lambda (_) #false) (delete-file! path))
   (let ((out (open-output-file path)))
     (display content out)
     (close-output-port out)))
@@ -78,11 +107,57 @@
           (if (>= i (string-length p)) (substring p last (string-length p))
               (if (char=? (string-ref p i) #\/) (loop (+ i 1) (+ i 1)) (loop (+ i 1) last)))))))
 
+(define (get-base-name p)
+  (let loop ((i 0) (last 0))
+    (if (>= i (string-length p))
+        (substring p last (- (string-length p) 3))
+        (if (char=? (string-ref p i) #\/)
+            (loop (+ i 1) (+ i 1))
+            (loop (+ i 1) last)))))
+
+;; --- v1.3.1: ensure vault exists even if Obsidian never installed ---
+(define (obelisk-mkdir-p! path)
+  (let ([proc (~> (command "mkdir" (list "-p" path))
+                  with-stdout-piped
+                  with-stderr-piped
+                  spawn-process)])
+    (when (Ok? proc)
+      (read-port-to-string (child-stdout (Ok->value proc))))))
+
+(define (obelisk-ensure-vault!)
+  (obelisk-mkdir-p! (string-append *obelisk-home* "/Documents"))
+  (obelisk-mkdir-p! vault-path)
+  (when (not (file-exists? (string-append vault-path "/Daily.md")))
+    (write-file-simple (string-append vault-path "/Daily.md")
+      "# Daily Notes\n\nWelcome to Obelisk.hx - Obsidian for Helix, no Obsidian app needed.\n\n## Try\n- Create a note with [[My First Note]] then :obelisk-follow\n- Tag something #hello then :obelisk-tags\n"))
+  (when (not (file-exists? (string-append vault-path "/Welcome.md")))
+    (write-file-simple (string-append vault-path "/Welcome.md")
+      "# Welcome to Obelisk\n\nThis vault was created by Obelisk.hx, not by Obsidian.\n\n- [[Daily]] - daily notes\n- Use Space o f to follow links\n")))
+
+(obelisk-ensure-vault!)
+
+;; --- SCAN - from trail-scan-files ---
+(define *obelisk-ignore-set*
+  (hashset ".git" "node_modules" "target" ".direnv" "__pycache__" ".hg" ".venv" "dist" "build" ".jj" ".obsidian"))
+
+(define (obelisk-scan-files root)
+  (define acc '())
+  (define (walk dir)
+    (for-each
+     (lambda (p)
+       (define name (file-name p))
+       (unless (hashset-contains? *obelisk-ignore-set* name)
+         (if (is-dir? p)
+             (walk p)
+             (when (string-contains? p ".md")
+               (set! acc (cons p acc))))))
+     (with-handler (lambda (_) '()) (read-dir dir))))
+  (walk root)
+  acc)
+
 (define (vault-files)
-  (let ((idx (string-append vault-path "/index.txt")))
-    (if (file-exists? idx)
-        (my-split-lines (read-file-simple idx))
-        (list (string-append vault-path "/Daily.md")))))
+  (obelisk-ensure-vault!)
+  (obelisk-scan-files vault-path))
 
 (define (find-in-file path needle)
   (if (not (file-exists? path)) '()
@@ -90,7 +165,8 @@
         (let loop ((ls lines) (n 1) (out '()))
           (if (null? ls) (reverse out)
               (if (string-contains? (car ls) needle)
-                  (loop (cdr ls) (+ n 1) (cons (string-append path ":" (number->string n) ": " (car ls)) out))
+                  (loop (cdr ls) (+ n 1)
+                        (cons (string-append "[[" (get-base-name path) "]] :" (number->string n) ": " (car ls)) out))
                   (loop (cdr ls) (+ n 1) out)))))))
 
 (define (find-in-vault needle)
@@ -99,18 +175,10 @@
       (if (null? fs) out
           (loop (cdr fs) (append out (find-in-file (car fs) needle)))))))
 
-;; --- FIXED v1.1.1: next-free-path ---
-(define obelisk-counter 0)
-
 (define (write-results-file name lines)
-  (set! obelisk-counter (+ obelisk-counter 1))
-  (let loop ((n obelisk-counter))
-    (let ((p (string-append "/tmp/obelisk-" name "-" (number->string n) ".md")))
-      (if (file-exists? p)
-          (loop (+ n 1))
-          (begin
-            (write-file-simple p (string-append "# Obelisk " name "\n\n" (my-join-lines lines "\n") "\n"))
-            p)))))
+  (let ((p (string-append "/tmp/obelisk-" name ".md")))
+    (write-file-simple p (string-append "# Obelisk " name "\n\n" (my-join-lines lines "\n") "\n"))
+    p))
 
 (define (extract-first-link path)
   (let ((lines (my-split-lines (read-file-simple path))))
@@ -129,19 +197,23 @@
           (write-file-simple full-path (string-append "# " trimmed "\n\n"))
           (helix.open full-path)))))
 
-;; --- commands ---
+;; --- commands: 0-arg commands use () , 1-arg commands use (. args) ---
 
 ;;@doc Open vault
-(define (obelisk-open) (helix.open vault-path))
+(define (obelisk-open)
+  (obelisk-ensure-vault!)
+  (helix.open vault-path))
 
 ;;@doc Daily
 (define (obelisk-daily)
+  (obelisk-ensure-vault!)
   (let ((daily (string-append vault-path "/Daily.md")))
     (when (not (file-exists? daily)) (write-file-simple daily "# Daily Notes\n\n"))
     (helix.open daily)))
 
 ;;@doc Follow [[wikilink]]
 (define (obelisk-follow)
+  (obelisk-ensure-vault!)
   (let ((path (get-current-file-path)))
     (if (not path)
         (helix.open vault-path)
@@ -150,17 +222,22 @@
               (helix.open vault-path)
               (open-link link))))))
 
-;;@doc New note
-(define (obelisk-new name)
-  (let* ((trimmed (my-trim name))
+;;@doc New note - FIXED v1.3.2: variadic, :obelisk-new works with 0 args
+(define (obelisk-new . args)
+  (obelisk-ensure-vault!)
+  (let* ((name (if (null? args) "Untitled" (car args)))
+         (trimmed (my-trim name))
          (with-md (if (string-contains? trimmed ".md") trimmed (string-append trimmed ".md")))
          (full (string-append vault-path "/" with-md)))
     (when (not (file-exists? full)) (write-file-simple full (string-append "# " trimmed "\n\n")))
     (helix.open full)))
 
-;;@doc Search vault
-(define (obelisk-search query)
-  (let ((results (find-in-vault query)))
+;;@doc Search vault - FIXED v1.3.2: variadic
+(define (obelisk-search . args)
+  (let* ((query (if (null? args) "" (car args)))
+         (results (if (equal? query "")
+                      (map (lambda (p) (string-append "[[" (get-base-name p) "]]")) (vault-files))
+                      (find-in-vault query))))
     (if (null? results)
         (helix.open vault-path)
         (let ((p (write-results-file "search" (cons (string-append "Search: " query) results))))
@@ -190,11 +267,17 @@
           (helix.vsplit)
           (helix.open p)))))
 
-;;@doc Set vault
-(define (obelisk-set-vault path) (set! vault-path path))
+;;@doc Set vault - FIXED v1.3.2: variadic
+(define (obelisk-set-vault . args)
+  (when (not (null? args))
+    (set! vault-path (car args)))
+  (obelisk-ensure-vault!)
+  (helix.open vault-path))
 
 ;;@doc Info
-(define (obelisk-info) (helix.open vault-path))
+(define (obelisk-info)
+  (obelisk-ensure-vault!)
+  (helix.open vault-path))
 
 (provide obelisk-open obelisk-daily obelisk-follow obelisk-tags obelisk-backlinks obelisk-search obelisk-new obelisk-set-vault obelisk-info)
 
